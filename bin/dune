@@ -1,0 +1,6 @@
+(executable
+ (public_name ocaml_crdt)
+ (name main)
+ (libraries ocaml_crdt)
+ (preprocess
+  (pps ppx_jane)))

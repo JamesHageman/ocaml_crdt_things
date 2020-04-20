@@ -1,0 +1,6 @@
+(library
+ (name ocaml_crdt_tests)
+ (libraries ocaml_crdt expect_test_helpers_kernel)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))
