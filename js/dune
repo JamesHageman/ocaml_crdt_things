@@ -1,0 +1,6 @@
+(executable
+ (name main_js)
+ (modes js)
+ (libraries ocaml_crdt core_kernel incr_dom async_kernel)
+ (preprocess
+  (pps ppx_jane)))
