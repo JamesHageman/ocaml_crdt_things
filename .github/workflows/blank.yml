@@ -29,5 +29,6 @@ jobs:
     # Runs a set of commands using the runners shell
     - name: dune build
       run: |
-        opam install -y dune core_kernel ppx_jane
+        opam install -y dune
+        opam install -y $(dune external-lib-deps --missing @@default)
         dune build
