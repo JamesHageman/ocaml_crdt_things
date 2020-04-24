@@ -12,6 +12,37 @@ module ID = struct
 
   type t = Elt.t list [@@deriving sexp, compare]
 
+  let base depth =
+    assert (depth > 0);
+    16 lsl (depth - 1)
+  ;;
+
+  let invariant t =
+    Invariant.invariant [%here] t [%sexp_of: t] (fun () ->
+        List.iteri t ~f:(fun i el ->
+            let depth = i + 1 in
+            assert (0 <= el && el < base depth)))
+  ;;
+
+  let%expect_test "base" =
+    for depth = 1 to 10 do
+      print_s [%sexp (base depth : int)]
+    done;
+    ();
+    [%expect
+      {|
+      16
+      32
+      64
+      128
+      256
+      512
+      1024
+      2048
+      4096
+      8192 |}]
+  ;;
+
   let prefix ~depth t : t =
     let len = List.length t in
     assert (len > 0);
@@ -23,34 +54,78 @@ module ID = struct
 
   let%expect_test "prefix" =
     let id = [ 1; 2; 3; 4 ] in
-    for depth = 0 to 6 do
+    for depth = 1 to 6 do
       print_s [%message "" (depth : int) ~_:(prefix ~depth id : t)]
     done;
-    [%expect.unreachable]
-    [@@expect.uncaught_exn
+    [%expect
       {|
-    (* CR expect_test_collector: This test expectation appears to contain a backtrace.
-       This is strongly discouraged as backtraces are fragile.
-       Please change this test to not include a backtrace. *)
-
-    "Assert_failure lseq/lseq.ml:18:4"
-    Raised at file "lseq/lseq.ml", line 18, characters 4-22
-    Called from file "lseq/lseq.ml", line 27, characters 45-61
-    Called from file "collector/expect_test_collector.ml", line 253, characters 12-19 |}]
+      ((depth 1) (1))
+      ((depth 2) (1 2))
+      ((depth 3) (1 2 3))
+      ((depth 4) (1 2 3 4))
+      ((depth 5) (1 2 3 4 0))
+      ((depth 6) (1 2 3 4 0 0)) |}]
   ;;
 
-  let add id x : t =
-    let len = List.length id in
-    assert (len > 0);
-    List.mapi id ~f:(fun i y -> if i < len - 1 then y else y + x)
+  let rec add id x : t =
+    match Ordering.of_int (Int.compare x 0) with
+    | Less -> sub id (-x)
+    | Equal -> id
+    | Greater ->
+      let arr = List.to_array id in
+      let depth = Array.length arr in
+      assert (depth > 0);
+      let new_last = Array.last arr + x in
+      assert (new_last > 0) (* don't allow actual int overflow *);
+      if new_last >= base depth
+      then
+        (* handle overflow *)
+        add (prefix ~depth (add (prefix id ~depth:(depth - 1)) 1)) (new_last - base depth)
+      else (
+        arr.(depth - 1) <- new_last;
+        Array.to_list arr)
+
+  and sub id x : t =
+    match Ordering.of_int (Int.compare x 0) with
+    | Less -> add id (-x)
+    | Equal -> id
+    | Greater ->
+      let arr = List.to_array id in
+      let depth = Array.length arr in
+      assert (depth > 0);
+      let new_last = Array.last arr - x in
+      if new_last < 0
+      then (* handle underflow *)
+        assert false
+      else (
+        arr.(depth - 1) <- new_last;
+        Array.to_list arr)
   ;;
 
   let%expect_test "add" =
-    let l = [ 1; 2; 3 ] in
-    print_s [%sexp (add l 7 : t)];
-    [%expect {| (1 2 10) |}];
-    print_s [%sexp (add l (-3) : t)];
-    [%expect {| (1 2 0) |}]
+    let p_add l x =
+      invariant l;
+      let l' = add l x in
+      invariant l';
+      (match Ordering.of_int (Int.compare x 0) with
+      | Less -> assert (Ordering.equal (Ordering.of_int (compare l' l)) Ordering.Less)
+      | Greater -> assert (Ordering.equal (Ordering.of_int (compare l l')) Ordering.Less)
+      | Equal -> assert (compare l l' = 0));
+      print_s [%sexp (l' : t)]
+    in
+    p_add [ 1; 2; 3 ] 1;
+    [%expect {| (1 2 4) |}];
+    p_add [ 1; 31 ] 1;
+    [%expect {| (2 0) |}];
+    p_add [ 1; 31; 63 ] 1;
+    [%expect {| (2 0 0) |}];
+    p_add [ 1; 2; 3 ] (-1);
+    [%expect {| (1 2 2) |}];
+    p_add [ 1; 2; 3 ] (-3);
+    [%expect {| (1 2 0) |}];
+    p_add [ 1; 2; 3 ] (-4);
+    [%expect {| (1 1 63) |}];
+    ()
   ;;
 end
 
@@ -70,9 +145,8 @@ module Tree = struct
   ;;
 
   let insert (ts : 'a t Doubly_linked.t) ~(id : ID.t) ~(el : 'a) ~depth =
-    assert (depth >= 1);
     let new_tree id el =
-      { id; el; size = 16 lsr (depth - 1); children = Doubly_linked.create () }
+      { id; el; size = ID.base depth; children = Doubly_linked.create () }
     in
     match id with
     | [] -> assert false
