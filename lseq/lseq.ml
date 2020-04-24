@@ -5,7 +5,22 @@ type boundary_t =
   | BoundaryMinus
 [@@deriving sexp]
 
-module ID = struct
+module ID : sig
+  module Elt : sig
+    type t [@@deriving sexp, compare, equal]
+  end
+
+  type t = Elt.t list [@@deriving sexp, compare]
+
+  include Invariant.S with type t := t
+
+  val add : t -> int -> t
+  val sub : t -> int -> t
+  val diff : lo:t -> hi:t -> int
+  val prefix : depth:int -> t -> t
+  val max_id : depth:int -> t
+  val min_id : depth:int -> t
+end = struct
   module Elt = struct
     type t = int [@@deriving sexp, compare, equal]
   end
@@ -78,9 +93,10 @@ module ID = struct
       let new_last = Array.last arr + x in
       assert (new_last > 0) (* don't allow actual int overflow *);
       if new_last >= base depth
-      then
+      then (
+        if depth = 1 then raise_s [%message "ID.add: overflow" (id : t) (x : int)];
         (* handle overflow *)
-        add (prefix ~depth (add (prefix id ~depth:(depth - 1)) 1)) (new_last - base depth)
+        add (prefix ~depth (add (prefix id ~depth:(depth - 1)) 1)) (new_last - base depth))
       else (
         arr.(depth - 1) <- new_last;
         Array.to_list arr)
@@ -95,15 +111,17 @@ module ID = struct
       assert (depth > 0);
       let new_last = Array.last arr - x in
       if new_last < 0
-      then
+      then (
+        if depth = 1 then raise_s [%message "ID.sub id x: underflow" (id : t) (x : int)];
         (* handle underflow *)
-        add (prefix ~depth (sub (prefix ~depth:(depth - 1) id) 1)) (base depth + new_last)
+        add (prefix ~depth (sub (prefix ~depth:(depth - 1) id) 1)) (base depth + new_last))
       else (
         arr.(depth - 1) <- new_last;
         Array.to_list arr)
   ;;
 
   let%expect_test "add" =
+    let open Expect_test_helpers_kernel in
     let p_add l x =
       invariant l;
       let l' = add l x in
@@ -112,7 +130,8 @@ module ID = struct
       | Less -> assert (Ordering.equal (Ordering.of_int (compare l' l)) Ordering.Less)
       | Greater -> assert (Ordering.equal (Ordering.of_int (compare l l')) Ordering.Less)
       | Equal -> assert (compare l l' = 0));
-      print_s [%sexp (l' : t)]
+      print_s [%sexp (l' : t)];
+      assert (compare l' (sub l (-x)) = 0)
     in
     p_add [ 1; 2; 3 ] 1;
     [%expect {| (1 2 4) |}];
@@ -128,33 +147,52 @@ module ID = struct
     [%expect {| (1 1 63) |}];
     p_add [ 2; 0; 0 ] (-1);
     [%expect {| (1 31 63) |}];
+    require_does_raise [%here] (fun () -> p_add [ 15; 31; 63 ] 1);
+    [%expect {| ("ID.add: overflow" (id (15)) (x 1)) |}];
+    require_does_raise [%here] (fun () -> p_add [ 0; 0; 0 ] (-1));
+    [%expect {| ("ID.sub id x: underflow" (id (0)) (x 1)) |}];
     ()
   ;;
+
+  let depth t = List.length t
+
+  let rec diff ~lo ~hi =
+    if depth lo <> depth hi
+    then
+      raise_s [%message "ID.diff ~lo ~hi: ids must have the same depth" (lo : t) (hi : t)];
+    match Ordering.of_int (compare lo hi) with
+    | Greater -> -diff ~lo:hi ~hi:lo
+    | Equal -> 0
+    | Less ->
+      List.map2_exn lo hi ~f:(fun lo hi -> hi - lo) |> List.reduce_exn ~f:Int.( * )
+  ;;
+
+  let max_id ~depth : t = List.init depth ~f:(fun i -> base (i + 1) - 1)
+  let min_id ~depth : t = List.init depth ~f:(const 0)
 end
 
 module Tree = struct
   type 'a t =
     { id : ID.Elt.t
     ; el : 'a
-    ; size : int
     ; children : 'a t Doubly_linked.t
     }
   [@@deriving sexp, fields]
 
-  let rec iter ~f { id; el; size = _; children } =
+  let rec iter ~f { id; el; children } =
     f (el, [ id ]);
     Doubly_linked.iter children ~f:(fun tree ->
         iter ~f:(fun (el, id') -> f (el, id :: id')) tree)
   ;;
 
-  let insert (ts : 'a t Doubly_linked.t) ~(id : ID.t) ~(el : 'a) ~depth =
-    let new_tree id el =
-      { id; el; size = ID.base depth; children = Doubly_linked.create () }
-    in
+  let insert (ts : 'a t Doubly_linked.t) ~(id : ID.t) ~(el : 'a) =
+    let new_tree id el = { id; el; children = Doubly_linked.create () } in
     match id with
     | [] -> assert false
     | [ (x : ID.Elt.t) ] ->
-      let after = Doubly_linked.find_elt ts ~f:(fun tree -> tree.id >= x) in
+      let after =
+        Doubly_linked.find_elt ts ~f:(fun tree -> ID.Elt.compare tree.id x >= 0)
+      in
       (match after with
       | None ->
         let (_ : _ Doubly_linked.Elt.t) = Doubly_linked.insert_last ts (new_tree x el) in
@@ -173,20 +211,15 @@ end
 
 type 'a t =
   { boundary : int
-  ; init_size : int
   ; s : (int (* depth *), boundary_t) Hashtbl.t
   ; tree : 'a Tree.t Doubly_linked.t
   }
 [@@deriving sexp_of]
 
-let empty () =
-  let init_size = 16 in
-  { boundary = 10; init_size; s = Int.Table.create (); tree = Doubly_linked.create () }
-;;
-
+let empty () = { boundary = 10; s = Int.Table.create (); tree = Doubly_linked.create () }
 let iter ~f t = Doubly_linked.iter t.tree ~f:(Tree.iter ~f)
-let front _ : ID.t = [ 0 ]
-let back t : ID.t = [ t.init_size - 1 ]
+let front : ID.t = ID.min_id ~depth:1
+let back : ID.t = ID.max_id ~depth:1
 
 (* https://hal.archives-ouvertes.fr/hal-00921633/document *)
 let alloc ~p ~q t : ID.t =
@@ -194,9 +227,7 @@ let alloc ~p ~q t : ID.t =
   let interval = ref 0 in
   while !interval < 1 do
     incr depth;
-    let depth = !depth in
-    interval
-      := List.last_exn (ID.prefix ~depth q) - List.last_exn (ID.prefix ~depth p) - 1
+    interval := ID.diff ~lo:p ~hi:q - 1
   done;
   let step = Int.min t.boundary !interval in
   let depth = !depth in
@@ -225,12 +256,12 @@ let alloc ~p ~q t : ID.t =
     ID.add (ID.prefix ~depth p) add_val
   | BoundaryMinus ->
     let sub_val = Random.int step + 1 in
-    ID.add (ID.prefix ~depth q) (-sub_val)
+    ID.sub (ID.prefix ~depth q) sub_val
 ;;
 
 let insert ~(after : ID.t) ~before (t : 'a t) (el : 'a) =
   let id = alloc ~p:after ~q:before t in
-  Tree.insert t.tree ~id ~el ~depth:1;
+  Tree.insert t.tree ~id ~el;
   id
 ;;
 
@@ -245,20 +276,32 @@ let%expect_test "insert" =
   let p t = print_s [%sexp (t : string t)] in
   let pp t = print_s [%sexp (to_list t : (string * ID.t) list)] in
   let l = empty () in
-  let _id = insert ~after:(front l) ~before:(back l) l "x" in
+  let id = insert ~after:front ~before:back l "x" in
   [%expect
     {| ((p (0)) (q (15)) (depth 1) (interval 14) (step 10) (strategy BoundaryPlus)) |}];
   p l;
   [%expect
     {|
-    ((boundary  10)
-     (init_size 16)
+    ((boundary 10)
      (s ((1 BoundaryPlus)))
      (tree ((
-       (id   3)
-       (el   x)
-       (size 16)
+       (id 3)
+       (el x)
        (children ()))))) |}];
   pp l;
-  [%expect {| ((x (3))) |}]
+  [%expect {| ((x (3))) |}];
+  let _id = insert ~after:id ~before:back l "y" in
+  p l;
+  [%expect
+    {|
+    ((p (3)) (q (15)) (depth 1) (interval 11) (step 10) (strategy BoundaryPlus))
+    ((boundary 10)
+     (s ((1 BoundaryPlus)))
+     (tree (
+       ((id 3)  (el x) (children ()))
+       ((id 12) (el y) (children ()))))) |}];
+  pp l;
+  [%expect {|
+    ((x (3))
+     (y (12))) |}]
 ;;
