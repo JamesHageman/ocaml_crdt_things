@@ -95,8 +95,9 @@ module ID = struct
       assert (depth > 0);
       let new_last = Array.last arr - x in
       if new_last < 0
-      then (* handle underflow *)
-        assert false
+      then
+        (* handle underflow *)
+        add (prefix ~depth (sub (prefix ~depth:(depth - 1) id) 1)) (base depth + new_last)
       else (
         arr.(depth - 1) <- new_last;
         Array.to_list arr)
@@ -125,6 +126,8 @@ module ID = struct
     [%expect {| (1 2 0) |}];
     p_add [ 1; 2; 3 ] (-4);
     [%expect {| (1 1 63) |}];
+    p_add [ 2; 0; 0 ] (-1);
+    [%expect {| (1 31 63) |}];
     ()
   ;;
 end
