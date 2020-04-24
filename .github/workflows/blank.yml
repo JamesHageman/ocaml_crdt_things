@@ -21,10 +21,10 @@ jobs:
     steps:
     # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
     - uses: actions/checkout@v2
-    - name: Set up OCaml
-      uses: avsm/setup-ocaml@v1.0.1
+    - name: Install ocaml and opam
+      uses: fangyi-zhou/actions-ocaml@v1
       with:
-        ocaml-version: 4.09.0
+        ocaml_version: 4.09.0
 
     # Runs a set of commands using the runners shell
     - name: dune build
