@@ -164,7 +164,38 @@ end = struct
     | Greater -> -diff ~lo:hi ~hi:lo
     | Equal -> 0
     | Less ->
-      List.map2_exn lo hi ~f:(fun lo hi -> hi - lo) |> List.reduce_exn ~f:Int.( * )
+      List.map2_exn lo hi ~f:(fun lo hi -> hi - lo)
+      |> List.rev
+      |> List.mapi ~f:(fun i x ->
+             let depth = i + 1 in
+             if i = 0 then x else x * base depth)
+      |> List.reduce_exn ~f:Int.( + )
+  ;;
+
+  let%expect_test "diff" =
+    let open Expect_test_helpers_kernel in
+    [ [ 1 ], [ 2 ]
+    ; [ 1; 0 ], [ 2; 0 ]
+    ; [ 1; 3 ], [ 2; 0 ]
+    ; [ 2; 0 ], [ 1; 0 ]
+    ; [ 1; 0; 0 ], [ 2; 0; 0 ]
+    ]
+    |> List.iter ~f:(fun (lo, hi) ->
+           printf
+             !"diff ~lo:%{sexp:t} ~hi:%{sexp:t} = %d\n"
+             (lo : t)
+             (hi : t)
+             (diff ~lo ~hi : int));
+    [%expect
+      {|
+      diff ~lo:(1) ~hi:(2) = 1
+      diff ~lo:(1 0) ~hi:(2 0) = 32
+      diff ~lo:(1 3) ~hi:(2 0) = 29
+      diff ~lo:(2 0) ~hi:(1 0) = -32
+      diff ~lo:(1 0 0) ~hi:(2 0 0) = 64 |}]
+    (* TODO this last one is wrong :( *);
+    require_does_raise [%here] (fun () -> diff ~lo:[ 1 ] ~hi:[ 1; 0 ]);
+    [%expect {| ("ID.diff ~lo ~hi: ids must have the same depth" (lo (1)) (hi (1 0))) |}]
   ;;
 
   let max_id ~depth : t = List.init depth ~f:(fun i -> base (i + 1) - 1)
