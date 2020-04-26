@@ -1,9 +1,6 @@
 open! Core_kernel
 
 (* wishlist:
- * - change underlying representation to an ordered_map from id -> el (maybe?)
- * - expose a debug utility to print out the actual LSEQ "tree"
- * - change api to work with 'a Elt.t, ala Doubly_linked
  * - write quickcheck property tests
  * - change ID.Elt.t to (int * string)
  * - implement [merge : other:'a t -> 'a t -> unit]
