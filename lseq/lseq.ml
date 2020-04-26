@@ -254,7 +254,6 @@ let iteri ~f t =
 ;;
 
 let iter ~f t = Map.iter t.tree ~f
-let iter_id ~f t = Map.iteri t.tree ~f:(fun ~key:id ~data -> f id data)
 let front : ID.t = ID.min_id ~depth:1
 let back : ID.t = ID.max_id ~depth:1
 
@@ -340,17 +339,10 @@ let insert_last t el =
   insert_between ~after ~before t el
 ;;
 
-let to_list t =
-  let ret = ref [] in
-  iter t ~f:(fun el -> ret := el :: !ret);
-  List.rev !ret
-;;
-
-let to_alist t =
-  let ret = ref [] in
-  iter_id t ~f:(fun id el -> ret := (id, el) :: !ret);
-  List.rev !ret
-;;
+let to_list t = Map.to_alist t.tree |> List.map ~f:snd
+let to_alist t = Map.to_alist t.tree
+let length t = Map.length t.tree
+let is_empty t = Map.is_empty t.tree
 
 open Expect_test_helpers_kernel
 
@@ -472,4 +464,86 @@ let%expect_test "big insert" =
        ((14 31 63 127 137) 45)
        ((14 31 63 127 144) 46)
        ((14 31 63 127 153) 47)))) |}]
+;;
+
+module Op = struct
+  type 'a t =
+    | Insert_first of 'a
+    | Insert_last of 'a
+    | Insert_before_idx of int * 'a
+    | Insert_after_idx of int * 'a
+  [@@deriving sexp, quickcheck]
+
+  let ith_elt_exn t idx =
+    let elt =
+      first_elt t |> Option.value_exn ~here:[%here] ~message:"ith_elt_exn: empty t" |> ref
+    in
+    for _ = 1 to idx do
+      elt
+        := next t !elt
+           |> Option.value_exn ~here:[%here] ~message:"ith_elt_exn: index out of range"
+    done;
+    !elt
+  ;;
+
+  let apply_to t op =
+    match op with
+    | Insert_first x -> insert_first t x |> (ignore : _ Elt.t -> unit)
+    | Insert_last x -> insert_last t x |> (ignore : _ Elt.t -> unit)
+    | Insert_after_idx (idx, x) ->
+      if is_empty t
+      then insert_last t x |> (ignore : _ Elt.t -> unit)
+      else (
+        let idx = idx % length t in
+        let elt = ith_elt_exn t idx in
+        insert_after t elt x |> (ignore : _ Elt.t -> unit))
+    | Insert_before_idx (idx, x) ->
+      if is_empty t
+      then insert_first t x |> (ignore : _ Elt.t -> unit)
+      else (
+        let idx = idx % length t in
+        let elt = ith_elt_exn t idx in
+        insert_before t elt x |> (ignore : _ Elt.t -> unit))
+  ;;
+end
+
+let quickcheck_generator gen_a =
+  let module Q = Quickcheck.Generator in
+  let open Quickcheck.Generator.Let_syntax in
+  let%bind ops = Q.list (Op.quickcheck_generator gen_a)
+  and boundary = Q.small_positive_int in
+  let t = create ~boundary () in
+  List.iter ops ~f:(Op.apply_to t);
+  return t
+;;
+
+let%expect_test "length" =
+  Quickcheck.test
+    ~sexp_of:[%sexp_of: char t]
+    (quickcheck_generator quickcheck_generator_char)
+    ~f:(fun t -> assert (List.length (to_list t) = length t))
+;;
+
+let%expect_test "insert_first" =
+  let open Quickcheck.Generator in
+  Quickcheck.test
+    ~sexp_of:[%sexp_of: char t * char]
+    (tuple2 (quickcheck_generator quickcheck_generator_char) quickcheck_generator_char)
+    ~f:(fun (t, c) ->
+      let before = to_list t in
+      let elt = insert_first t c in
+      assert (List.equal Char.equal (to_list t) (c :: before));
+      assert (Char.(Elt.value elt = c)))
+;;
+
+let%expect_test "insert_last" =
+  let open Quickcheck.Generator in
+  Quickcheck.test
+    ~sexp_of:[%sexp_of: char t * char]
+    (tuple2 (quickcheck_generator quickcheck_generator_char) quickcheck_generator_char)
+    ~f:(fun (t, c) ->
+      let before = to_list t in
+      let elt = insert_last t c in
+      assert (List.equal Char.equal (to_list t) (before @ [ c ]));
+      assert (Char.(Elt.value elt = c)))
 ;;
