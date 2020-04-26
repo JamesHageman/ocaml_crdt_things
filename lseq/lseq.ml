@@ -13,6 +13,7 @@ module ID : sig
 
   type t = Elt.t list [@@deriving sexp, compare]
 
+  include Comparable.S with type t := t
   include Invariant.S with type t := t
 
   val add : t -> int -> t
@@ -26,9 +27,15 @@ end = struct
     type t = int [@@deriving sexp, compare, equal]
   end
 
+  module T = struct
+    type t = Elt.t list [@@deriving sexp, compare]
+  end
+
+  include T
+
   type t = Elt.t list [@@deriving sexp, compare]
 
-  let base depth =
+  let base (depth : int) =
     assert (depth > 0);
     16 lsl (depth - 1)
   ;;
@@ -213,6 +220,8 @@ end = struct
 
   let max_id ~depth : t = List.init depth ~f:(fun i -> base (i + 1) - 1)
   let min_id ~depth : t = List.init depth ~f:(const 0)
+
+  include Comparable.Make (T)
 end
 
 module Elt = struct
@@ -220,85 +229,32 @@ module Elt = struct
     { id : ID.t
     ; value : 'a
     }
-  [@@deriving fields]
-end
+  [@@deriving fields, sexp]
 
-module Tree = struct
-  type 'a t =
-    { id : ID.Elt.t
-    ; el : 'a
-    ; children : 'a t Doubly_linked.t
-    }
-  [@@deriving sexp, fields]
-
-  let rec iter_id ~f { id; el; children } =
-    f [ id ] el;
-    Doubly_linked.iter children ~f:(fun tree ->
-        iter_id ~f:(fun id' el -> f (id :: id') el) tree)
-  ;;
-
-  let iter ~f t = iter_id ~f:(fun _id el -> f el) t
-
-  let rec insert (ts : 'a t Doubly_linked.t) ~(id : ID.t) ~(el : 'a) =
-    let new_tree id el = { id; el; children = Doubly_linked.create () } in
-    match id with
-    | [] -> assert false
-    | [ (x : ID.Elt.t) ] ->
-      let after =
-        Doubly_linked.find_elt ts ~f:(fun tree -> ID.Elt.compare tree.id x >= 0)
-      in
-      (match after with
-      | None ->
-        let (_ : _ Doubly_linked.Elt.t) = Doubly_linked.insert_last ts (new_tree x el) in
-        ()
-      | Some tree ->
-        if ID.Elt.equal (Doubly_linked.Elt.value tree).id x
-        then raise_s [%message "id already exists in tree" (x : ID.Elt.t)]
-        else (
-          let (_ : _ Doubly_linked.Elt.t) =
-            Doubly_linked.insert_before ts tree (new_tree x el)
-          in
-          ()))
-    | x :: xs ->
-      (match Doubly_linked.find ts ~f:(fun tree -> ID.Elt.compare tree.id x = 0) with
-      | None -> assert false
-      | Some tree -> insert tree.children ~id:xs ~el)
-  ;;
-
-  let next (ts : 'a t Doubly_linked.t) { Elt.id; value } =
-    match id with
-    | [] -> assert false
-    | [ x ] -> failwith "tODO next non-rec"
-    | x :: xs -> failwith "TODO next recursive"
-  ;;
-
-  let prev (ts : 'a t Doubly_linked.t) { Elt.id; value } = failwith "TODO prev"
+  let of_tuple (id, value) = { id; value }
 end
 
 type 'a t =
   { boundary : int
   ; rng : (Random.State.t[@sexp.opaque])
   ; s : (int (* depth *), boundary_t) Hashtbl.t
-  ; tree : 'a Tree.t Doubly_linked.t
+  ; mutable tree : 'a ID.Map.t
   }
-[@@deriving sexp_of]
+[@@deriving sexp_of, fields]
 
 let create ?(rng = Random.State.default) ?(boundary = 10) () =
-  { boundary; rng; s = Int.Table.create (); tree = Doubly_linked.create () }
+  { boundary; rng; s = Int.Table.create (); tree = ID.Map.empty }
 ;;
 
 let iteri ~f t =
   let i = ref 0 in
-  Doubly_linked.iter
-    t.tree
-    ~f:
-      (Tree.iter ~f:(fun x ->
-           f !i x;
-           incr i))
+  Map.iter t.tree ~f:(fun x ->
+      f !i x;
+      incr i)
 ;;
 
-let iter ~f t = Doubly_linked.iter t.tree ~f:(Tree.iter ~f)
-let iter_id ~f t = Doubly_linked.iter t.tree ~f:(Tree.iter_id ~f)
+let iter ~f t = Map.iter t.tree ~f
+let iter_id ~f t = Map.iteri t.tree ~f:(fun ~key:id ~data -> f id data)
 let front : ID.t = ID.min_id ~depth:1
 let back : ID.t = ID.max_id ~depth:1
 
@@ -346,29 +302,20 @@ let%expect_test "alloc" =
 let insert_between ~(after : ID.t) ~before (t : 'a t) (value : 'a) =
   let { rng; s; boundary; _ } = t in
   let id = alloc ~p:after ~q:before ~rng ~s ~boundary in
-  Tree.insert t.tree ~id ~el:value;
+  t.tree <- Map.add_exn t.tree ~key:id ~data:value;
   { Elt.id; value }
 ;;
 
-let next t elt = Tree.next t.tree elt
-let prev t elt = Tree.prev t.tree elt
-
-let first_elt t =
-  Doubly_linked.first t.tree
-  |> Option.map ~f:(fun { Tree.id; el; _ } -> { Elt.id = [ id ]; value = el })
+let next t elt =
+  Map.closest_key t.tree `Greater_than elt.Elt.id |> Option.map ~f:Elt.of_tuple
 ;;
 
-let last_elt t =
-  let rec last_rec ts =
-    match Doubly_linked.last ts with
-    | None -> None
-    | Some { Tree.id; el; children; _ } ->
-      (match last_rec children with
-      | None -> Some { Elt.id = [ id ]; value = el }
-      | Some { Elt.id = id'; value } -> Some { id = id :: id'; value })
-  in
-  last_rec t.tree
+let prev t elt =
+  Map.closest_key t.tree `Less_than elt.Elt.id |> Option.map ~f:Elt.of_tuple
 ;;
+
+let first_elt t = Map.min_elt t.tree |> Option.map ~f:Elt.of_tuple
+let last_elt t = Map.max_elt t.tree |> Option.map ~f:Elt.of_tuple
 
 let insert_first t el =
   let after = front in
@@ -424,10 +371,7 @@ let%expect_test "insert" =
     ((boundary 10)
      (rng      <opaque>)
      (s ((1 BoundaryPlus)))
-     (tree ((
-       (id 3)
-       (el x)
-       (children ()))))) |}];
+     (tree (((3) x)))) |}];
   pp l;
   [%expect {| ((x (3))) |}];
   let _elt = insert_after l elt "y" in
@@ -438,21 +382,35 @@ let%expect_test "insert" =
      (rng      <opaque>)
      (s ((1 BoundaryPlus)))
      (tree (
-       ((id 3)  (el x) (children ()))
-       ((id 12) (el y) (children ()))))) |}];
+       ((3)  x)
+       ((12) y)))) |}];
   pp l;
   [%expect {|
     ((x (3))
      (y (12))) |}]
 ;;
 
+let invariant check_a t =
+  Invariant.invariant [%here] t [%sexp_of: _ t] (fun () ->
+      let check f = Invariant.check_field t f in
+      Fields.iter
+        ~boundary:(check (fun b -> assert (b > 0)))
+        ~rng:(check ignore)
+        ~s:(check (Hashtbl.invariant (fun depth -> assert (depth > 0)) ignore))
+        ~tree:
+          (check (fun tree ->
+               assert (Map.invariants tree);
+               Map.iteri tree ~f:(fun ~key ~data ->
+                   ID.invariant key;
+                   check_a data))))
+;;
+
 let%expect_test "big insert" =
   (* mass insertion at the back *)
   let l = create ~rng:(Random.State.make [||]) () in
   (List.init 48 ~f:Int.to_string : string list)
-  |> List.iter ~f:(fun x ->
-         let (_ : _ Elt.t) = insert_last l x in
-         ());
+  |> List.iter ~f:(fun x -> insert_last l x |> (ignore : _ Elt.t -> unit));
+  invariant ignore l;
   [%expect {||}];
   p l;
   [%expect
@@ -466,62 +424,52 @@ let%expect_test "big insert" =
        (4 BoundaryMinus)
        (5 BoundaryPlus)))
      (tree (
-       ((id 1)  (el 0) (children ()))
-       ((id 6)  (el 1) (children ()))
-       ((id 7)  (el 2) (children ()))
-       ((id 10) (el 3) (children ()))
-       ((id 14)
-        (el 4)
-        (children (
-          ((id 3)  (el 5)  (children ()))
-          ((id 8)  (el 6)  (children ()))
-          ((id 16) (el 7)  (children ()))
-          ((id 25) (el 8)  (children ()))
-          ((id 27) (el 9)  (children ()))
-          ((id 30) (el 10) (children ()))
-          ((id 31)
-           (el 11)
-           (children (
-             ((id 55)
-              (el 12)
-              (children ()))
-             ((id 63)
-              (el 13)
-              (children (
-                ((id 121) (el 14) (children ()))
-                ((id 123) (el 15) (children ()))
-                ((id 126) (el 16) (children ()))
-                ((id 127)
-                 (el 17)
-                 (children (
-                   ((id 2)   (el 18) (children ()))
-                   ((id 11)  (el 19) (children ()))
-                   ((id 20)  (el 20) (children ()))
-                   ((id 29)  (el 21) (children ()))
-                   ((id 31)  (el 22) (children ()))
-                   ((id 33)  (el 23) (children ()))
-                   ((id 34)  (el 24) (children ()))
-                   ((id 35)  (el 25) (children ()))
-                   ((id 37)  (el 26) (children ()))
-                   ((id 47)  (el 27) (children ()))
-                   ((id 56)  (el 28) (children ()))
-                   ((id 61)  (el 29) (children ()))
-                   ((id 70)  (el 30) (children ()))
-                   ((id 78)  (el 31) (children ()))
-                   ((id 84)  (el 32) (children ()))
-                   ((id 87)  (el 33) (children ()))
-                   ((id 95)  (el 34) (children ()))
-                   ((id 105) (el 35) (children ()))
-                   ((id 106) (el 36) (children ()))
-                   ((id 108) (el 37) (children ()))
-                   ((id 115) (el 38) (children ()))
-                   ((id 120) (el 39) (children ()))
-                   ((id 123) (el 40) (children ()))
-                   ((id 124) (el 41) (children ()))
-                   ((id 130) (el 42) (children ()))
-                   ((id 134) (el 43) (children ()))
-                   ((id 136) (el 44) (children ()))
-                   ((id 137) (el 45) (children ()))
-                   ((id 144) (el 46) (children ()))
-                   ((id 153) (el 47) (children ()))))))))))))))))) |}]
+       ((1)  0)
+       ((6)  1)
+       ((7)  2)
+       ((10) 3)
+       ((14) 4)
+       ((14 3)  5)
+       ((14 8)  6)
+       ((14 16) 7)
+       ((14 25) 8)
+       ((14 27) 9)
+       ((14 30) 10)
+       ((14 31) 11)
+       ((14 31 55) 12)
+       ((14 31 63) 13)
+       ((14 31 63 121) 14)
+       ((14 31 63 123) 15)
+       ((14 31 63 126) 16)
+       ((14 31 63 127) 17)
+       ((14 31 63 127 2)   18)
+       ((14 31 63 127 11)  19)
+       ((14 31 63 127 20)  20)
+       ((14 31 63 127 29)  21)
+       ((14 31 63 127 31)  22)
+       ((14 31 63 127 33)  23)
+       ((14 31 63 127 34)  24)
+       ((14 31 63 127 35)  25)
+       ((14 31 63 127 37)  26)
+       ((14 31 63 127 47)  27)
+       ((14 31 63 127 56)  28)
+       ((14 31 63 127 61)  29)
+       ((14 31 63 127 70)  30)
+       ((14 31 63 127 78)  31)
+       ((14 31 63 127 84)  32)
+       ((14 31 63 127 87)  33)
+       ((14 31 63 127 95)  34)
+       ((14 31 63 127 105) 35)
+       ((14 31 63 127 106) 36)
+       ((14 31 63 127 108) 37)
+       ((14 31 63 127 115) 38)
+       ((14 31 63 127 120) 39)
+       ((14 31 63 127 123) 40)
+       ((14 31 63 127 124) 41)
+       ((14 31 63 127 130) 42)
+       ((14 31 63 127 134) 43)
+       ((14 31 63 127 136) 44)
+       ((14 31 63 127 137) 45)
+       ((14 31 63 127 144) 46)
+       ((14 31 63 127 153) 47)))) |}]
 ;;

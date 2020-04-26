@@ -35,3 +35,5 @@ val last_elt : 'a t -> 'a Elt.t option
 val iteri : f:(int -> 'a -> unit) -> 'a t -> unit
 val iter : f:('a -> unit) -> 'a t -> unit
 val to_list : 'a t -> 'a list
+
+include Invariant.S1 with type 'a t := 'a t
